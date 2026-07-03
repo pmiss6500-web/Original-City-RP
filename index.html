@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Original City RP</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/icon-192.png" />
+<link rel="apple-touch-icon" href="/icon-192.png" />
+<meta name="theme-color" content="#1b1f27" />
+<style>
+  * { box-sizing: border-box; font-family: 'Segoe UI', sans-serif; }
+  body { margin: 0; background: #1b1f27; color: #eee; overflow: hidden; }
+  .screen { display: none; flex-direction: column; align-items: center; justify-content: center; height: 100vh; padding: 20px; }
+  .screen.active { display: flex; }
+  h1 { color: #ffb703; margin-bottom: 10px; }
+  .card { background: #262b36; padding: 16px; border-radius: 10px; width: 100%; max-width: 380px; margin: 8px 0; cursor: pointer; border: 2px solid transparent; }
+  .card:hover { border-color: #ffb703; }
+  input { width: 100%; max-width: 380px; padding: 10px; margin: 6px 0; border-radius: 6px; border: none; background: #333; color: #fff; }
+  button { padding: 10px 20px; border-radius: 6px; border: none; background: #ffb703; color: #1b1f27; font-weight: bold; cursor: pointer; margin-top: 10px; }
+  .char-grid { display: flex; gap: 14px; }
+  .char-option { width: 80px; height: 100px; background: #262b36; border-radius: 8px; display: flex; align-items: center; justify-content: center; border: 2px solid transparent; cursor: pointer; }
+  .char-option.selected { border-color: #ffb703; }
+  #worldWrap { position: relative; width: 100vw; height: 100vh; }
+  #gameCanvas { background: #3a7d44; display: block; }
+  #joystick { position: fixed; bottom: 30px; left: 30px; width: 100px; height: 100px; border-radius: 50%; background: rgba(255,255,255,0.15); z-index: 5; }
+  #joystick-knob { width: 40px; height: 40px; border-radius: 50%; background: #ffb703; position: absolute; top: 30px; left: 30px; }
+  #hud { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.5); padding: 8px 14px; border-radius: 8px; z-index: 5; }
+  #actionBtn { position: fixed; bottom: 40px; right: 30px; background: #ffb703; color: #1b1f27; padding: 14px 18px; border-radius: 50%; font-weight: bold; z-index: 5; display: none; }
+  #toast { position: fixed; top: 60px; left: 50%; transform: translateX(-50%); background: #ffb703; color: #1b1f27; padding: 8px 16px; border-radius: 6px; font-weight: bold; display: none; z-index: 6; }
+</style>
+</head>
+<body>
+
+<div id="screen-servers" class="screen active">
+  <h1>Original City RP</h1>
+  <p>Available servers</p>
+  <div id="serverList"></div>
+</div>
+
+<div id="screen-login" class="screen">
+  <h1>Login</h1>
+  <input id="loginUser" placeholder="Username" />
+  <input id="loginPass" type="password" placeholder="Password" />
+  <button onclick="login()">Login</button>
+  <button onclick="register()" style="background:#444;color:#fff;">Register</button>
+  <p id="loginMsg"></p>
+</div>
+
+<div id="screen-character" class="screen">
+  <h1>Choose your character</h1>
+  <div class="char-grid" id="charGrid"></div>
+  <button onclick="enterWorld()">Enter World</button>
+</div>
+
+<div id="screen-world" class="screen">
+  <div id="worldWrap">
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">💰 $<span id="moneyVal">0</span></div>
+    <div id="toast"></div>
+    <button id="actionBtn">E</button>
+    <div id="joystick"><div id="joystick-knob"></div></div>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// Register service worker so the browser recognizes this as an installable PWA
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
+  });
+}
+
+let socket = null;
+let myUsername = "";
+let myCharacter = "red";
+let players = {};
+let vehicles = [];
+let MAP = null;
+let money = 0;
+let me = { x: 400, y: 300, anim: "idle", facing: "down", inVehicle: null };
+
+function showScreen(id) {
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.innerText = msg;
+  t.style.display = "block";
+  setTimeout(() => t.style.display = "none", 1800);
+}
+
+// ---------- SERVER LIST ----------
+async function loadServers() {
+  const res = await fetch("/api/servers");
+  const servers = await res.json();
+  const list = document.getElementById("serverList");
+  list.innerHTML = "";
+  servers.forEach(s => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `<b>${s.name}</b><br>${s.players}/${s.maxPlayers} players`;
+    div.onclick = () => showScreen("screen-login");
+    list.appendChild(div);
+  });
+}
+loadServers();
+
+// ---------- LOGIN / REGISTER ----------
+async function register() {
+  const username = document.getElementById("loginUser").value;
+  const password = document.getElementById("loginPass").value;
+  const res = await fetch("/api/register", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const data = await res.json();
+  document.getElementById("loginMsg").innerText = data.success ? "Registered! Now login." : data.error;
+}
+
+async function login() {
+  const username = document.getElementById("loginUser").value;
+  const password = document.getElementById("loginPass").value;
+  const res = await fetch("/api/login", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  const data = await res.json();
+  if (data.success) {
+    myUsername = username;
+    if (data.player) {
+      me.x = data.player.x; me.y = data.player.y;
+      money = data.player.money;
+      myCharacter = data.player.character || "red";
+    }
+    showScreen("screen-character");
+    setupCharacterGrid();
+  } else {
+    document.getElementById("loginMsg").innerText = data.error;
+  }
+}
+
+// ---------- CHARACTER SELECT ----------
+const CHAR_COLORS = { red: "#e63946", blue: "#457b9d", green: "#2a9d8f" };
+function setupCharacterGrid() {
+  const grid = document.getElementById("charGrid");
+  grid.innerHTML = "";
+  Object.keys(CHAR_COLORS).forEach(name => {
+    const div = document.createElement("div");
+    div.className = "char-option" + (name === myCharacter ? " selected" : "");
+    div.style.background = CHAR_COLORS[name];
+    div.onclick = () => { myCharacter = name; setupCharacterGrid(); };
+    grid.appendChild(div);
+  });
+}
+
+// ---------- ENTER WORLD ----------
+async function enterWorld() {
+  MAP = await (await fetch("/api/map")).json();
+  showScreen("screen-world");
+  resizeCanvas();
+
+  socket = io();
+  socket.emit("player:join", { username: myUsername, character: myCharacter });
+
+  socket.on("world:state", (state) => {
+    players = state.players;
+    vehicles = state.vehicles;
+  });
+  socket.on("player:new", (p) => { players[p.id] = p; });
+  socket.on("player:update", (p) => { players[p.id] = p; });
+  socket.on("player:leave", (id) => { delete players[id]; });
+  socket.on("vehicle:update", (v) => {
+    const idx = vehicles.findIndex(x => x.id === v.id);
+    if (idx >= 0) vehicles[idx] = v;
+  });
+  socket.on("job:reward", (data) => {
+    money = data.money;
+    toast(`+$${data.amount} earned!`);
+  });
+
+  document.getElementById("actionBtn").onclick = handleAction;
+  requestAnimationFrame(gameLoop);
+}
+
+// ---------- CANVAS SETUP ----------
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resizeCanvas);
+
+// ---------- JOYSTICK ----------
+let moveDir = { x: 0, y: 0 };
+let walkCycle = 0;
+const joystick = document.getElementById("joystick");
+const knob = document.getElementById("joystick-knob");
+let dragging = false;
+
+joystick.addEventListener("touchstart", () => dragging = true);
+joystick.addEventListener("touchmove", (e) => {
+  if (!dragging) return;
+  const rect = joystick.getBoundingClientRect();
+  const touch = e.touches[0];
+  let dx = touch.clientX - (rect.left + rect.width / 2);
+  let dy = touch.clientY - (rect.top + rect.height / 2);
+  const dist = Math.min(30, Math.hypot(dx, dy));
+  const angle = Math.atan2(dy, dx);
+  knob.style.left = 30 + Math.cos(angle) * dist + "px";
+  knob.style.top = 30 + Math.sin(angle) * dist + "px";
+  moveDir.x = Math.cos(angle) * (dist / 30);
+  moveDir.y = Math.sin(angle) * (dist / 30);
+});
+joystick.addEventListener("touchend", () => {
+  dragging = false;
+  moveDir = { x: 0, y: 0 };
+  knob.style.left = "30px";
+  knob.style.top = "30px";
+});
+// Keyboard fallback (for desktop testing)
+const keys = {};
+window.addEventListener("keydown", e => keys[e.key] = true);
+window.addEventListener("keyup", e => keys[e.key] = false);
+
+// ---------- COLLISION ----------
+function collidesWithBuilding(x, y) {
+  const r = 10; // player radius
+  return MAP.buildings.some(b =>
+    x + r > b.x && x - r < b.x + b.w && y + r > b.y && y - r < b.y + b.h
+  );
+}
+
+// ---------- ACTION BUTTON (context sensitive: enter/exit vehicle, do job) ----------
+let nearVehicle = null;
+let nearJob = false;
+
+function handleAction() {
+  if (me.inVehicle) {
+    socket.emit("vehicle:exit", me.inVehicle);
+    me.inVehicle = null;
+  } else if (nearVehicle) {
+    socket.emit("vehicle:enter", nearVehicle.id);
+    me.inVehicle = nearVehicle.id;
+  } else if (nearJob) {
+    socket.emit("job:complete");
+  }
+}
+
+// ---------- GAME LOOP ----------
+function gameLoop() {
+  const speed = me.inVehicle ? 5 : 2.5;
+  let kx = (keys["ArrowRight"] || keys["d"] ? 1 : 0) - (keys["ArrowLeft"] || keys["a"] ? 1 : 0);
+  let ky = (keys["ArrowDown"] || keys["s"] ? 1 : 0) - (keys["ArrowUp"] || keys["w"] ? 1 : 0);
+  const dx = moveDir.x || kx;
+  const dy = moveDir.y || ky;
+  const moving = Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1;
+
+  if (moving) {
+    const nx = me.x + dx * speed;
+    const ny = me.y + dy * speed;
+    // Vehicles ignore building collision for simplicity; players don't
+    if (me.inVehicle || !collidesWithBuilding(nx, me.y)) me.x = Math.max(0, Math.min(MAP.width, nx));
+    if (me.inVehicle || !collidesWithBuilding(me.x, ny)) me.y = Math.max(0, Math.min(MAP.height, ny));
+    me.anim = "walk";
+    me.facing = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? "right" : "left") : (dy > 0 ? "down" : "up");
+    walkCycle += me.inVehicle ? 0.4 : 0.25;
+  } else {
+    me.anim = "idle";
+  }
+
+  if (socket) socket.emit("player:move", { x: me.x, y: me.y, anim: me.anim, facing: me.facing });
+
+  // Proximity checks for action button
+  nearVehicle = !me.inVehicle ? vehicles.find(v => !v.driverId && Math.hypot(v.x - me.x, v.y - me.y) < 50) : null;
+  nearJob = !me.inVehicle && MAP.jobPoint && Math.hypot(MAP.jobPoint.x - me.x, MAP.jobPoint.y - me.y) < 60;
+  const actionBtn = document.getElementById("actionBtn");
+  actionBtn.style.display = (me.inVehicle || nearVehicle || nearJob) ? "block" : "none";
+  actionBtn.innerText = me.inVehicle ? "Exit" : nearVehicle ? "Enter" : "Job";
+
+  document.getElementById("moneyVal").innerText = money;
+
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// ---------- RENDER ----------
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const camX = me.x - canvas.width / 2;
+  const camY = me.y - canvas.height / 2;
+
+  ctx.save();
+  ctx.translate(-camX, -camY);
+
+  // ground
+  ctx.fillStyle = "#3a7d44";
+  ctx.fillRect(0, 0, MAP.width, MAP.height);
+
+  // buildings
+  MAP.buildings.forEach(b => {
+    ctx.fillStyle = "#6c757d";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(b.name, b.x + b.w / 2, b.y + b.h / 2);
+  });
+
+  // job point
+  ctx.beginPath();
+  ctx.fillStyle = "#ffd60a";
+  ctx.arc(MAP.jobPoint.x, MAP.jobPoint.y, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#000";
+  ctx.font = "10px sans-serif";
+  ctx.fillText("JOB", MAP.jobPoint.x, MAP.jobPoint.y + 3);
+
+  // vehicles
+  vehicles.forEach(v => {
+    ctx.fillStyle = v.driverId ? "#e76f51" : "#264653";
+    ctx.fillRect(v.x - 20, v.y - 12, 40, 24);
+    ctx.fillStyle = "#fff";
+    ctx.font = "9px sans-serif";
+    ctx.fillText("CAR", v.x, v.y + 3);
+  });
+
+  // other players
+  Object.values(players).forEach(p => {
+    if (p.id === socket.id) return;
+    drawCharacter(p.x, p.y, p.character, p.anim, p.facing, walkCycle, false, p.username);
+  });
+
+  // me (skip drawing body if inside vehicle)
+  if (!me.inVehicle) drawCharacter(me.x, me.y, myCharacter, me.anim, me.facing, walkCycle, true, "You");
+
+  ctx.restore();
+}
+
+function drawCharacter(x, y, colorName, anim, facing, cycle, isMe, label) {
+  const color = CHAR_COLORS[colorName] || "#e63946";
+  const legSwing = anim === "walk" ? Math.sin(cycle) * 8 : 0;
+  const bob = anim === "walk" ? Math.abs(Math.sin(cycle)) * 3 : 0;
+
+  ctx.save();
+  ctx.translate(x, y - bob);
+
+  ctx.strokeStyle = "#222";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(-4, 20); ctx.lineTo(-4 + legSwing, 32);
+  ctx.moveTo(4, 20); ctx.lineTo(4 - legSwing, 32);
+  ctx.stroke();
+
+  ctx.fillStyle = color;
+  ctx.fillRect(-8, 0, 16, 22);
+
+  ctx.beginPath();
+  ctx.fillStyle = "#f1c27d";
+  ctx.arc(0, -8, 8, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#000";
+  const dirOffset = { up: [0, -12], down: [0, -4], left: [-6, -8], right: [6, -8] }[facing] || [0, -8];
+  ctx.beginPath();
+  ctx.arc(dirOffset[0], dirOffset[1], 1.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(label, x, y - 22);
+}
+</script>
+</body>
+</html>

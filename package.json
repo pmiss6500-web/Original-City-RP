@@ -1,0 +1,15 @@
+{
+  "name": "crmp-demo-server",
+  "version": "1.0.0",
+  "description": "Original multiplayer game server demo (CR:MP style architecture)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "better-sqlite3": "^11.3.0",
+    "bcryptjs": "^2.4.3"
+  }
+}
